@@ -30,7 +30,8 @@ ALLOWED_HOSTS = []
 
 CORS_ORIGIN_WHITELIST = [
     'http://127.0.0.1:5173',
-    'http://localhost:5173'
+    'http://localhost:5173',
+    'https://frp-end.com:54895'
 ]
 
 # 允许携带 Cookie
@@ -90,7 +91,7 @@ DATABASES = {
         "ENGINE": "django.db.backends.mysql",
         "NAME": "aiueo",
         "USER": "root",
-        "PASSWORD": "HY030827hy",
+        "PASSWORD": "WYQ030811",
         "HOST": "127.0.0.1",
         "PORT": "3306"
     }

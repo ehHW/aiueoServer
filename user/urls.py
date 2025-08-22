@@ -22,8 +22,9 @@ urlpatterns = [
     # path('connect_permission_permission2/', views.connect_permission_permission2, name='connect_permission_permission2'),
     # path('create_menu/', views.create_menu, name='create_menu'),
     # 好友相关
-    path('friends/request/', views.send_friend_request),
-    path('friends/request/<int:request_id>/', views.handle_friend_request),
+    path('friends/request/add/', views.send_friend_request),
+    path('friends/request/list/', views.friend_request_list),
+    path('friends/request/handle/', views.handle_friend_request),
     path('friends/', views.friend_list),
     # 会话相关
     path('conversations/group/', views.create_group_chat),

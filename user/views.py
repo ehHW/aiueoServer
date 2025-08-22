@@ -734,8 +734,6 @@ def menu_list(request):
 #         'data': None
 #     }, status=201)
 
-#-------------------------------------------
-
 
 #-----------------好友相关--------------------
 # 获取好友列表：查询接受的好友请求，合并发送和接收的记录
@@ -756,14 +754,14 @@ def send_friend_request(request):
     if not receiver_id:
         return error_response(400, '缺少必要参数')
     try:
-        receiver = User.objects.get(user_id=receiver_id)  # 根据你的用户表结构调整
+        receiver = User.objects.get(user_id__exact=receiver_id)  # 根据你的用户表结构调整
         if receiver == user:
             return error_response(400, '不能添加自己为好友')
 
         # 检查是否已存在请求（优化查询）
         existing_request = FriendRequest.objects.filter(
-            sender__in=[request.user, receiver],
-            receiver__in=[request.user, receiver],
+            sender_id__in=[user.user_id, receiver.user_id],
+            receiver_id__in=[user.user_id, receiver.user_id],
             status=FriendRequest.PENDING
         ).exists()
 
@@ -778,22 +776,41 @@ def send_friend_request(request):
         return error_response(500, '服务器内部错误')
 
 
+def friend_request_list(request):
+    a_token = get_a_token(request)
+    user = get_user(a_token)
+    if not user:
+        return error_response(401, message='用户认证失败')
+
+    try:
+        # 获取接收的好友请求
+        friend_requests = FriendRequest.objects.filter(receiver_id__exact=user.user_id)
+        sender_list = User.objects.filter(user_id__in=[fr.sender_id for fr in friend_requests])
+        response_data = [{
+            'sender_id': sl.user_id,
+            'sender_username': sl.username,
+            'sender_avatar': sl.avatar if sl.avatar else None,
+        } for sl in sender_list]
+
+        return success_response(data=response_data, message='好友请求列表获取成功')
+    except Exception as e:
+        return error_response(500, '服务器内部错误')
+
+
 # 处理好友请求
-def handle_friend_request(request, request_id):
+def handle_friend_request(request):
     a_token = get_a_token(request)
     user = get_user(a_token)
     if not user:
         return error_response(401, message='用户认证失败')
 
     action = request.POST.get('action')
+    sender_id = request.POST.get('sender_id')
     if action not in ['accept', 'decline']:
         return error_response(400, '无效操作类型')
 
-    action = request.POST.get('action')
-    if action not in ['accept', 'decline']:
-        return error_response(400, '无效操作类型')
     try:
-        fr = FriendRequest.objects.get(id=request_id, receiver=user)
+        fr = FriendRequest.objects.get(sender_id__exact=sender_id, receiver_id__exact=user.user_id)
         if action == 'accept':
             fr.status = FriendRequest.ACCEPTED
             fr.save()
@@ -807,7 +824,7 @@ def handle_friend_request(request, request_id):
     except FriendRequest.DoesNotExist:
         return error_response(404, '好友请求不存在')
     except Exception as e:
-        return error_response(500, '操作失败')
+        return error_response(500, '服务器内部错误')
 
 
 # 获取好友列表
