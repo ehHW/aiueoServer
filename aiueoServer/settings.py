@@ -31,7 +31,7 @@ ALLOWED_HOSTS = []
 CORS_ORIGIN_WHITELIST = [
     'http://127.0.0.1:5173',
     'http://localhost:5173',
-    'https://frp-end.com:54895'
+    'https://frp-end.com:54895',
 ]
 
 # 允许携带 Cookie
@@ -42,12 +42,15 @@ ACCESS_CONTROL_ALLOW_ORIGIN = 'http://127.0.0.1:5173'
 
 INSTALLED_APPS = [
     "corsheaders",
+    "daphne",
+    'channels',
     "django.contrib.auth",
     "django.contrib.contenttypes",
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "user.apps.UserConfig",
+    "chat.apps.ChatConfig",
 ]
 
 MIDDLEWARE = [
@@ -81,6 +84,19 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = "aiueoServer.wsgi.application"
+ASGI_APPLICATION = "aiueoServer.asgi.application"
+
+# 配置通道层，使用Redis作为后端（可选，但生产环境推荐）
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
+        "CONFIG": {
+            "hosts": [("127.0.0.1", 6379), {
+                # "password": "030827",
+            }],
+        },
+    },
+}
 
 
 # Database

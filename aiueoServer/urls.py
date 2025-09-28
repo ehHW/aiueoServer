@@ -26,4 +26,5 @@ urlpatterns = [
     # path("admin/", admin.site.urls),
     path('', index, name="index"),
     path("user/", include('user.urls')),
+    path("chat/", include('chat.urls')),
 ]

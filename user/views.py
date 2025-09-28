@@ -68,7 +68,6 @@ def test(request):
     user = get_user(a_token)
     if not user:
         return error_response(401, message='用户认证失败')
-    print(user.user_id, user.role_id, user.username)
     return success_response()
 
 
