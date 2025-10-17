@@ -78,7 +78,6 @@ def login(request):
     # 获取请求参数
     mobile = request.POST.get('mobile')
     password = request.POST.get('password')
-
     try:
         # 用户认证
         user = User.objects.get(mobile__exact=mobile)
@@ -110,8 +109,8 @@ def login(request):
                 httponly=True,  # 禁止 JavaScript 访问
                 secure=True,  # 仅 HTTPS 传输（本地开发可设为 False）
                 samesite='None',  # 防止 CSRF 攻击
-                path='/user',  # 限制 Cookie 路径
-                domain='127.0.0.1',  # 指定生效域名
+                path='/',  # 限制 Cookie 路径
+                # domain='127.0.0.1',  # 指定生效域名
             )
             return response
         else:
