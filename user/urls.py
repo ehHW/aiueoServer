@@ -21,19 +21,6 @@ urlpatterns = [
     path('menu_list/', views.menu_list, name='menu_list'),
     # path('connect_permission_permission2/', views.connect_permission_permission2, name='connect_permission_permission2'),
     # path('create_menu/', views.create_menu, name='create_menu'),
-    # 好友相关
-    path('friends/request/add/', views.send_friend_request),
-    path('friends/request/list/', views.friend_request_list),
-    path('friends/request/handle/', views.handle_friend_request),
-    path('friends/', views.friend_list),
-    # 会话相关
-    path('conversations/group/', views.create_group_chat),
-    path('conversations/', views.conversation_list),
-    # 消息相关
-    path('messages/send/', views.send_message),
-    path('messages/history/', views.message_history),
-    path('messages/mark-read/', views.mark_as_read),
-
 
     path('test/', views.test),
 ]

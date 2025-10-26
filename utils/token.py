@@ -17,7 +17,7 @@ Refresh Token 过期 → 强制用户重新登录
 """
 JWT_ACCESS_KEY = "MSMj8y6KfoEcjpiACUdtoBnwRBWaEC23leqQwEQGgjg"
 JWT_REFRESH_KEY = "q4tLWwfGX7Arr8cAIIAGEclPPShMx6_SRcqAzkNeq9g"
-effective_minutes = 1
+effective_minutes = 60
 
 
 def create_key():
