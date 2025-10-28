@@ -11,13 +11,13 @@ class FriendRequest(models.Model):
     PENDING, ACCEPTED, DECLINED = "pending", "accepted", "declined"
     STATUS_CHOICES = [(PENDING, "Pending"), (ACCEPTED, "Accepted"), (DECLINED, "Declined")]
 
-    # 谁发起的（真正的发起人）
+    # 谁发起的
     from_user_id = models.PositiveIntegerField(db_index=True, default=0)
 
     # 谁接收的
     to_user_id = models.PositiveIntegerField(db_index=True, default=1)
 
-    # 用于保证关系唯一性（不区分方向）
+    # 保证关系唯一性
     lesser_id = models.PositiveIntegerField(editable=False, db_index=True)
     greater_id = models.PositiveIntegerField(editable=False, db_index=True)
 

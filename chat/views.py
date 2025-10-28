@@ -1,5 +1,11 @@
 # chat/views.py
+import json
+from typing import List
 from django.http import HttpResponse, JsonResponse
+from django.views.decorators.http import require_http_methods
+from django.db import transaction
+from django.db.models import Max, F, Q, OuterRef, Subquery
+
 from .models import Conversation, ConversationParticipant, FriendRequest, Message
 from user.models import User
 from utils.user import get_user
@@ -7,6 +13,7 @@ from utils.response import success_response, error_response
 from utils.user import get_a_token, get_user
 
 from django.utils import timezone
+from django.utils import timezone as dj_tz
 from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
 from django.db import models
 
@@ -38,16 +45,12 @@ def send_friend_request(request):
         receiver = User.objects.get(user_id__exact=receiver_id)  # 根据你的用户表结构调整
         if receiver == user:
             return error_response(400, '不能添加自己为好友')
-
-        # 检查是否已存在请求（优化查询）
-        # existing_request = FriendRequest.objects.filter(
-        #     sender_id__in=[user.user_id, receiver.user_id],
-        #     receiver_id__in=[user.user_id, receiver.user_id],
-        #     status=FriendRequest.PENDING
-        # ).exists()
-        # if existing_request:
-        #     return JsonResponse({'error': '已存在待处理的好友请求'}, status=400)
-        # FriendRequest.objects.create(sender=user, receiver=receiver)
+        if FriendRequest.objects.filter(
+            lesser_id=min(user.user_id, receiver_id),
+            greater_id=max(user.user_id, receiver_id),
+            status=FriendRequest.ACCEPTED
+        ).exists():
+            return error_response(400, '双方已经是好友')
 
         req_obj, created = FriendRequest.objects.get_or_create(
             from_user_id=user.user_id,
@@ -156,119 +159,118 @@ def friend_list(request):
 
 #-----------------会话相关--------------------
 # 获取或创建私聊会话：确保为每对用户创建唯一的私聊会话
-def get_or_create_private_conversation(user1, user2):
-    conversations = Conversation.objects.filter(
-        type=Conversation.PRIVATE,
-        participants__user=user1
-    ).filter(
-        participants__user=user2
-    ).distinct()
-    if conversations.exists():
-        return conversations.first()
-    else:
-        conversation = Conversation.objects.create(type=Conversation.PRIVATE, creator=user1)
-        ConversationParticipant.objects.create(user=user1, conversation=conversation)
-        ConversationParticipant.objects.create(user=user2, conversation=conversation)
-        return conversation
+@require_http_methods(["POST"])
+def get_or_create_private(request):
+    user = get_user(get_a_token(request))
+    if not user:
+        return error_response(401, '用户认证失败')
+    target_id = request.POST.get('target_id')
+    if not target_id:
+        return error_response(400, '参数缺失')
+    try:
+        target_id = int(target_id)
+    except TypeError:
+        error_response(400, '参数错误')
+    if target_id == user.user_id:
+        return error_response(400, '不能和自己私聊')
+
+    members = sorted([user.user_id, target_id])
+
+    with transaction.atomic():
+        # 唯一索引兜底，并发也安全
+        conv, created = Conversation.objects.get_or_create(
+            type=Conversation.PRIVATE,
+            private_members=members,
+            defaults={'creator': user}
+        )
+        if created:
+            ConversationParticipant.objects.bulk_create([
+                ConversationParticipant(user_id=uid, conversation=conv)
+                for uid in members
+            ])
+
+    return success_response({'conversation_id': conv.id}, '私聊会话已建立')
 
 
 # 创建群聊
-def create_group_chat(request):
-    a_token = get_a_token(request)
-    user = get_user(a_token)
+@require_http_methods(["POST"])
+def create_group(request):
+    user = get_user(get_a_token(request))
     if not user:
-        return error_response(401, message='用户认证失败')
+        return error_response(401, '用户认证失败')
 
-    name = request.POST.get('name', '新群聊')
-    participant_ids = request.POST.getlist('participants')  # 用户ID列表
-
-    if not participant_ids:
-        return error_response(400, '至少需要选择一个参与者')
-
+    name = request.POST.get('name')
     try:
-        # 创建会话
-        conversation = Conversation.objects.create(
+        member_ids: List = json.loads(request.POST.get('member_ids'))
+    except TypeError:
+        error_response(400, '参数错误')
+    if not name:
+        return error_response(400, '群名称不能为空')
+    if user.user_id not in member_ids:
+        member_ids.append(user.user_id)
+    if len(member_ids) < 2:
+        return error_response(400, '至少再拉 1 人')
+
+    with transaction.atomic():
+        conv = Conversation.objects.create(
             type=Conversation.GROUP,
             name=name,
             creator=user
         )
-
-        # 添加参与者（包括创建者）
-        participants = {user}
-        for uid in participant_ids:
-            try:
-                participants.add(User.objects.get(user_id=uid))
-            except User.DoesNotExist:
-                continue
-
-        # 批量创建参与者
         ConversationParticipant.objects.bulk_create([
-            ConversationParticipant(user=u, conversation=conversation)
-            for u in participants
+            ConversationParticipant(user_id=uid, conversation=conv)
+            for uid in member_ids
         ])
 
-        return success_response(
-            data={
-                'conversation_id': conversation.id,
-                'name': conversation.name
-            },
-            message='群聊创建成功'
-        )
-
-    except Exception as e:
-        return error_response(500, '群聊创建失败')
+    return success_response({'conversation_id': conv.id}, '群聊创建成功')
 
 
 # 获取会话列表
-def conversation_list(request):
-    a_token = get_a_token(request)
-    user = get_user(a_token)
+@require_http_methods(["GET"])
+def list_conversations(request):
+    # ---------- 认证 ----------
+    user = get_user(get_a_token(request))
     if not user:
-        return error_response(401, message='用户认证失败')
-    # 获取用户参与的所有会话
-    # conversations = Conversation.objects.filter(
-    #     participants__user=user
-    # ).prefetch_related('participants__user', 'messages').order_by('-messages__timestamp')
-    conversations = Conversation.objects.filter(
-        participants__user=user
-    ).prefetch_related(
-        'participants__user',
-        models.Prefetch('messages', queryset=Message.objects.order_by('-timestamp'))
-    ).distinct()
+        return error_response(401, '用户认证失败')
 
-    response_data = []
-    for conv in conversations:
-        # 获取最后一条消息（使用预取数据）
-        last_message = conv.messages.first() if conv.messages.exists() else None
+    # ---------- 子查询：最新消息 ----------
+    last_msg_sq = Message.objects.filter(
+        conversation=OuterRef('pk')
+    ).order_by('-timestamp')[:1]
 
-        # 获取未读消息数（优化查询）
-        participant = conv.participants.get(user=user)
-        unread_count = conv.messages.filter(
-            timestamp__gt=participant.last_read
-        ).count() if participant.last_read else conv.messages.count()
+    # ---------- 主查询 ----------
+    qs = (Conversation.objects
+          .filter(participants__user=user)
+          .annotate(
+              last_msg_id=Subquery(last_msg_sq.values('id')[:1]),
+              last_time=Subquery(last_msg_sq.values('timestamp')[:1])
+          )
+          .order_by('-last_time', '-created_at'))
 
-        # 构建会话名称
-        if conv.type == Conversation.PRIVATE:
-            other_user = conv.participants.exclude(user=user).first().user
-            conv_name = other_user.username
+    data = []
+    for c in qs:
+        # 未读数
+        participant = c.participants.get(user=user)
+        unread = max((c.last_msg_id or 0) - (participant.read_up_to_msg_id or 0), 0)
+
+        # 私聊：拼对方昵称 + 头像
+        if c.type == Conversation.PRIVATE:
+            mate_uid = [uid for uid in c.private_members if uid != user.user_id][0]
+            title = f'用户{mate_uid}'          # 没有 nickname，先拼一个
         else:
-            conv_name = conv.name
+            title = c.name or f'群聊#{c.id}'   # 没有群头像字段
 
-        response_data.append({
-            'conversation_id': conv.id,
-            'type': conv.type,
-            'name': conv_name,
-            'last_message': {
-                'content': last_message.content if last_message else None,
-                'timestamp': last_message.timestamp.isoformat() if last_message else None
-            },
-            'unread_count': unread_count
+        data.append({
+            'id': c.id,
+            'type': c.type,
+            'title': title,
+            'unread': unread,
+            'last_msg_id': c.last_msg_id,
+            'last_time': c.last_time.timestamp() if c.last_time else None,
+            'created_at': c.created_at.timestamp()
         })
 
-    return success_response(
-        data=sorted(response_data, key=lambda x: x['last_message']['timestamp'] or '', reverse=True),
-        message='会话列表获取成功'
-    )
+    return success_response(data, '会话列表获取成功')
 
 
 #-----------------消息相关--------------------
@@ -313,7 +315,8 @@ def send_message(request):
 
 
 # 获取消息历史
-def message_history(request):
+@require_http_methods(["GET"])
+def list_messages(request):
     a_token = get_a_token(request)
     user = get_user(a_token)
     if not user:
@@ -322,43 +325,73 @@ def message_history(request):
     conversation_id = request.GET.get('conversation_id')
     if not conversation_id:
         return error_response(401, '房间获取失败')
-
-    page = request.GET.get('page', 1)
-    page_size = 20  # 每页消息数量
-
+    if not ConversationParticipant.objects.filter(
+        conversation_id=conversation_id, user=user
+    ).exists():
+        return error_response(403, '你不在该会话中')
     try:
-        conversation = Conversation.objects.get(id=conversation_id)
-        if not conversation.participants.filter(user=user).exists():
-            return error_response(403, '无访问权限')
+        last_msg_id = int(request.GET.get('last_msg_id', 0))
+        limit = int(request.GET.get('limit', 20))
+    except ValueError:
+        return error_response(400, '分页参数非法')
+    limit = max(1, min(limit, 50))          # 至少 1 条，最多 50
+    
+    qs = (Message.objects
+          .filter(conversation_id=conversation_id, id__gt=last_msg_id)
+          .select_related('sender')
+          .order_by('timestamp')[:limit])
 
-        messages = conversation.messages.order_by('-timestamp')
-        paginator = Paginator(messages, page_size)
+    # 6. 序列化
+    data = []
+    for m in qs:
+        ts = m.timestamp
+        if dj_tz.is_aware(ts):
+            ts = ts.astimezone(timezone.utc)
+        data.append({
+            'id': m.id,
+            'sender_id': m.sender_id,
+            'sender_username': m.sender.username,
+            'content': m.content,
+            'timestamp': int(ts.timestamp() * 1000),
+            'is_recalled': m.is_recalled,
+            'parent_id': m.parent_message_id or 0,
+        })
+    return success_response(data)
+    # page = request.GET.get('page', 1)
+    # page_size = 20  # 每页消息数量
+    # try:
+    #     conversation = Conversation.objects.get(id=conversation_id)
+    #     if not conversation.participants.filter(user=user).exists():
+    #         return error_response(403, '无访问权限')
 
-        try:
-            page_obj = paginator.page(page)
-        except PageNotAnInteger:
-            page_obj = paginator.page(1)
-        except EmptyPage:
-            page_obj = paginator.page(paginator.num_pages)
+    #     messages = conversation.messages.order_by('-timestamp')
+    #     paginator = Paginator(messages, page_size)
 
-        return success_response(
-            data={
-                'messages': [{
-                    'message_id': msg.id,
-                    'sender_id': msg.sender.user_id,  # 根据用户表结构调整
-                    'content': msg.content,
-                    'timestamp': msg.timestamp.isoformat(),
-                    'parent_message_id': msg.parent_message_id
-                } for msg in page_obj],
-                'current_page': page_obj.number,
-                'total_pages': paginator.num_pages,
-                'has_next': page_obj.has_next()
-            },
-            message='消息历史获取成功'
-        )
+    #     try:
+    #         page_obj = paginator.page(page)
+    #     except PageNotAnInteger:
+    #         page_obj = paginator.page(1)
+    #     except EmptyPage:
+    #         page_obj = paginator.page(paginator.num_pages)
 
-    except Conversation.DoesNotExist:
-        return error_response(404, '会话不存在')
+    #     return success_response(
+    #         data={
+    #             'messages': [{
+    #                 'message_id': msg.id,
+    #                 'sender_id': msg.sender.user_id,  # 根据用户表结构调整
+    #                 'content': msg.content,
+    #                 'timestamp': msg.timestamp.isoformat(),
+    #                 'parent_message_id': msg.parent_message_id
+    #             } for msg in page_obj],
+    #             'current_page': page_obj.number,
+    #             'total_pages': paginator.num_pages,
+    #             'has_next': page_obj.has_next()
+    #         },
+    #         message='消息历史获取成功'
+    #     )
+
+    # except Conversation.DoesNotExist:
+    #     return error_response(404, '会话不存在')
 
 
 # 标记消息已读
