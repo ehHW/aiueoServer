@@ -87,7 +87,6 @@ def friend_request_list(request):
             'sender_time': fr.created_at,
             'sender_avatar': fr.from_user.avatar if fr.from_user.avatar else None,
         } for fr in friend_requests]
-
         return success_response(data=data, message='好友请求列表获取成功')
     except Exception as e:
         return error_response(500, '服务器内部错误')
@@ -256,7 +255,8 @@ def list_conversations(request):
         # 私聊：拼对方昵称 + 头像
         if c.type == Conversation.PRIVATE:
             mate_uid = [uid for uid in c.private_members if uid != user.user_id][0]
-            title = f'用户{mate_uid}'          # 没有 nickname，先拼一个
+            target_user = User.objects.get(user_id=mate_uid)
+            title = f'{target_user.username}'          # 没有 nickname，先拼一个
         else:
             title = c.name or f'群聊#{c.id}'   # 没有群头像字段
 
@@ -336,11 +336,14 @@ def list_messages(request):
         return error_response(400, '分页参数非法')
     limit = max(1, min(limit, 50))          # 至少 1 条，最多 50
     
-    qs = (Message.objects
-          .filter(conversation_id=conversation_id, id__gt=last_msg_id)
-          .select_related('sender')
-          .order_by('timestamp')[:limit])
-
+    # ---------- 5. 取消息 ----------
+    qs = Message.objects.filter(
+        conversation_id=conversation_id
+    ).select_related('sender')
+    if last_msg_id > 0:
+        qs = qs.filter(id__lt=last_msg_id)   # 往前翻
+    qs = qs.order_by('-timestamp')[:limit]
+    qs = reversed(qs)
     # 6. 序列化
     data = []
     for m in qs:
@@ -356,42 +359,7 @@ def list_messages(request):
             'is_recalled': m.is_recalled,
             'parent_id': m.parent_message_id or 0,
         })
-    return success_response(data)
-    # page = request.GET.get('page', 1)
-    # page_size = 20  # 每页消息数量
-    # try:
-    #     conversation = Conversation.objects.get(id=conversation_id)
-    #     if not conversation.participants.filter(user=user).exists():
-    #         return error_response(403, '无访问权限')
-
-    #     messages = conversation.messages.order_by('-timestamp')
-    #     paginator = Paginator(messages, page_size)
-
-    #     try:
-    #         page_obj = paginator.page(page)
-    #     except PageNotAnInteger:
-    #         page_obj = paginator.page(1)
-    #     except EmptyPage:
-    #         page_obj = paginator.page(paginator.num_pages)
-
-    #     return success_response(
-    #         data={
-    #             'messages': [{
-    #                 'message_id': msg.id,
-    #                 'sender_id': msg.sender.user_id,  # 根据用户表结构调整
-    #                 'content': msg.content,
-    #                 'timestamp': msg.timestamp.isoformat(),
-    #                 'parent_message_id': msg.parent_message_id
-    #             } for msg in page_obj],
-    #             'current_page': page_obj.number,
-    #             'total_pages': paginator.num_pages,
-    #             'has_next': page_obj.has_next()
-    #         },
-    #         message='消息历史获取成功'
-    #     )
-
-    # except Conversation.DoesNotExist:
-    #     return error_response(404, '会话不存在')
+    return success_response(data, '消息列表获取成功')
 
 
 # 标记消息已读

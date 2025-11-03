@@ -13,6 +13,16 @@ def get_user(a_token):
         return None
 
 
+# def get_user_by_r_token(r_token):
+#     decoded = token.decode_refresh_token(r_token)
+#     if decoded['state'] == 1:
+#         user_id = decoded['data']['user_id']
+#         user = User.objects.get(user_id__exact=user_id)
+#         return user
+#     else:
+#         return None
+
+
 def get_a_token(request):
     authorization = request.headers.get('Authorization')
     if not authorization:
