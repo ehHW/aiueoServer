@@ -33,6 +33,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         # 把需要回给前端字段一次性读出
         return {
             "id": msg.id,
+            "conv_id": conv_id,
             "sender_id": sender.user_id,
             "sender_username": sender.username,
             "parent_id": parent.id if parent else None,
@@ -41,6 +42,10 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "is_recalled": False,
         }
 
+    @sync_to_async
+    def get_other_user_id(self, conv_id, me):
+        # 1v1 会话只有两条 participant 记录
+        return Conversation.objects.get(pk=conv_id).participants.exclude(user_id=me).first().user_id
     # ---------- 连接 ----------
     async def connect(self):
         # 前端连接 ws/chat/<conv_id>/
@@ -48,13 +53,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.room_group = f'chat_{self.conv_id}'
         self.validate_user()
         await self.channel_layer.group_add(self.room_group, self.channel_name)
+        # ✅ 关键：再加一个“个人收件箱”
+        self.inbox_group = f'user_{self.user_id}'
+        await self.channel_layer.group_add(self.inbox_group, self.channel_name)
         await self.accept()
         print(f'[WS] {self.channel_name} 加入房间 {self.room_group}')
+        print(f'[WS] {self.channel_name} 加入房间 {self.inbox_group}')
 
     # ---------------- 断开 ----------------
     async def disconnect(self, code):
         if self.room_group:
             await self.channel_layer.group_discard(self.room_group, self.channel_name)
+        if hasattr(self, 'inbox_group'):
+            await self.channel_layer.group_discard(self.inbox_group, self.channel_name)
         print(f'[WS] {self.channel_name} 离开房间 {self.room_group}')
         raise StopConsumer()
 
@@ -97,12 +108,26 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 "payload": payload  # 把完整 dict 发出去
             }
         )
+        # 2. 投到收件箱
+        other_uid = await self.get_other_user_id(self.conv_id, self.user_id)
+        await self.channel_layer.group_send(
+            f'user_{other_uid}',
+            {"type": "inbox.notify", "payload": payload}
+        )
 
     async def chat_message(self, event):
         # print('chat_message', event)
         # 给客户端发送消息 - 群组
         await self.send(text_data=json.dumps({
+            "type": "normal",
             'msg': event['payload'],
+        }))
+    
+    async def inbox_notify(self, event):
+    # 只推送，不追加 DOM，前端自己决定是弹窗还是未读+1
+        await self.send(text_data=json.dumps({
+            "type": "inbox",
+            "msg": event["payload"]
         }))
     
     def validate_user(self):
