@@ -31,47 +31,55 @@ def test(request):
 def login(request):
     if request.method != 'POST':
         return error_response(405, "请求方法不允许")
-
     # 获取请求参数
-    mobile = request.POST.get('mobile')
-    password = request.POST.get('password')
+    login_name = request.POST.get('login_name', '').strip()
+    password = request.POST.get('password', '').strip()
+    print(login_name, password)
+    if not login_name or not password:
+        return error_response(400, '缺少必填参数')
     try:
         # 用户认证
-        user = User.objects.get(mobile__exact=mobile)
-        if user.password == password:
-            access_token = token.create_access_token(user.user_id, user.role_id)
-            r_token = token.create_refresh_token(user.user_id, user.role_id)
-            response_data = {
-                'state': 200,
-                'msg': '登录成功',
-                'data': {
-                    'token': access_token,
-                    'user_id': user.user_id,
-                    'mobile': user.mobile,
-                    'username': user.username,
-                    'avatar': f"{user.avatar}",
-                    'role_id': user.role_id,
-                    'role_name': Role.objects.get(role_id__exact=user.role_id).role_name,
-                    'expires_in': token.effective_minutes * 60
-                }
-            }
-
-            # 返回带token的响应
-            response =  JsonResponse(response_data, status=200)
-            # 设置 Refresh Token 到安全 Cookie
-            response.set_cookie(
-                key='refresh_token',  # Cookie 名称
-                value=r_token,  # Refresh Token 值
-                max_age=timedelta(days=7).total_seconds(),  # 7天有效期
-                httponly=True,  # 禁止 JavaScript 访问
-                secure=True,  # 仅 HTTPS 传输（本地开发可设为 False）
-                samesite='None',  # 防止 CSRF 攻击
-                path='/',  # 限制 Cookie 路径
-                # domain='127.0.0.1',  # 指定生效域名
-            )
-            return response
-        else:
+        # 1. 先认为是用户名查一把
+        user = User.objects.filter(username=login_name).first()
+        # 2. 用户名没命中 → 再按手机号查
+        if user is None:
+            user = User.objects.filter(mobile=login_name).first()
+        # 3. 都没命中
+        if user is None:
             return error_response(401, '用户名或密码错误')
+        # 4. 密码校验
+        if user.password != password:
+            return error_response(401, '用户名或密码错误')
+        access_token = token.create_access_token(user.user_id, user.role_id)
+        r_token = token.create_refresh_token(user.user_id, user.role_id)
+        response_data = {
+            'state': 200,
+            'msg': '登录成功',
+            'data': {
+                'token': access_token,
+                'user_id': user.user_id,
+                'mobile': user.mobile,
+                'username': user.username,
+                'avatar': f"{user.avatar}",
+                'role_id': user.role_id,
+                'role_name': Role.objects.get(role_id__exact=user.role_id).role_name,
+                'expires_in': token.effective_minutes * 60
+            }
+        }
+        # 返回带token的响应
+        response =  JsonResponse(response_data, status=200)
+        # 设置 Refresh Token 到安全 Cookie
+        response.set_cookie(
+            key='refresh_token',  # Cookie 名称
+            value=r_token,  # Refresh Token 值
+            max_age=timedelta(days=7).total_seconds(),  # 7天有效期
+            httponly=True,  # 禁止 JavaScript 访问
+            secure=True,  # 仅 HTTPS 传输（本地开发可设为 False）
+            samesite='None',  # 防止 CSRF 攻击
+            path='/',  # 限制 Cookie 路径
+            # domain='127.0.0.1',  # 指定生效域名
+        )
+        return response
     except Exception as e:
         return error_response(500, '服务器内部错误')
 
@@ -137,14 +145,12 @@ def create_user(request):
         user = get_user(a_token)
         if not user:
             return error_response(401, message='用户认证失败')
-
         if not verify_auth(user.user_id, create_user_permission2_id):
             return error_response(400, '权限不足')
     except:
         return error_response(400, '用户id错误')
     # 手机号正则表达式（中国标准）
     MOBILE_REGEX = r'^1[3-9]\d{9}$'
-
     try:
         # 2. 参数提取与基本校验
         required_fields = ['mobile', 'username', 'password']
@@ -158,22 +164,20 @@ def create_user(request):
         missing = [field for field in required_fields if not data.get(field)]
         if missing:
             return error_response(400, f"缺少必要参数: {','.join(missing)}")
-
         # 4. 手机号格式验证
         if not re.match(MOBILE_REGEX, data['mobile']):
             return error_response(400, "手机号格式错误")
-
         if not (2 <= len(data['username']) <= 6):
             return error_response(400, "用户名格式错误")
-
         # 5. 密码强度校验（可扩展正则表达式）
         if not (6 <= len(data['password']) <= 16):
             return error_response(400, "密码长度6-16位")
-
         # 6. 手机号唯一性校验
         if User.objects.filter(mobile=data['mobile']).exists():
             return error_response(400, "手机号已注册")
-
+        # 7. 用户名唯一性校验
+        if User.objects.filter(username=data['username']).exists():
+            return error_response(409, "用户名已存在")
         # 7. 创建用户（使用Django原生用户模型）
         user = User(
             username=data['username'],
@@ -295,14 +299,12 @@ def update_user(request):
         user = get_user(a_token)
         if not user:
             return error_response(401, message='用户认证失败')
-
         if not verify_auth(user.user_id, update_user_permission2_id):
             return error_response(400, '权限不足')
     except:
         return error_response(400, '用户id错误')
         # 手机号正则表达式（中国标准）
     MOBILE_REGEX = r'^1[3-9]\d{9}$'
-
     try:
         # 2. 参数提取与基本校验
         required_fields = ['mobile', 'username', 'user_id']
@@ -317,18 +319,18 @@ def update_user(request):
         missing = [field for field in required_fields if not data.get(field)]
         if missing:
             return error_response(400, f"缺少必要参数: {','.join(missing)}")
-
         # 4. 手机号格式验证
         if not re.match(MOBILE_REGEX, data['mobile']):
             return error_response(400, "手机号格式错误")
-
         if not (2 <= len(data['username']) <= 6):
             return error_response(400, "用户名格式错误")
-
         user = User.objects.get(user_id__exact=data['user_id'])
         # 6. 手机号唯一性校验
         if user.mobile != data['mobile'] and User.objects.filter(mobile__exact=data['mobile']).exists():
             return error_response(400, "手机号已注册")
+        # 7. 用户名唯一性校验
+        if User.objects.filter(username=data['username']).exists():
+            return error_response(409, "用户名已存在")
         user.username = data['username']
         user.mobile = data['mobile']
         if not data['password']:

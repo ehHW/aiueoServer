@@ -9,7 +9,6 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('user', '0027_alter_conversationparticipant_unique_together_and_more'),
     ]
 
     operations = [

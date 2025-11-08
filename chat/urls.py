@@ -10,6 +10,7 @@ urlpatterns = [
     path('friends/request/list/', views.friend_request_list),
     path('friends/request/handle/', views.handle_friend_request),
     path('friends/', views.friend_list),
+    path('friends/request/del/<int:conv_id>/', views.del_friend_or_quit_group),
     # 会话相关
     path('conversations/group/', views.create_group),
     path('conversations/', views.list_conversations),

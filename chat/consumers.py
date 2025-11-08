@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.exceptions import StopConsumer
 import django
@@ -30,7 +31,6 @@ class ChatConsumer(AsyncWebsocketConsumer):
             content=content,
             parent_message=parent
         )
-        # 把需要回给前端字段一次性读出
         return {
             "id": msg.id,
             "conv_id": conv_id,
@@ -38,7 +38,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
             "sender_username": sender.username,
             "parent_id": parent.id if parent else None,
             "content": msg.content,
-            "timestamp": msg.timestamp.isoformat(),  # ISO 8601
+            "timestamp": msg.timestamp.isoformat(),
             "is_recalled": False,
         }
 
@@ -46,19 +46,35 @@ class ChatConsumer(AsyncWebsocketConsumer):
     def get_other_user_id(self, conv_id, me):
         # 1v1 会话只有两条 participant 记录
         return Conversation.objects.get(pk=conv_id).participants.exclude(user_id=me).first().user_id
+
+    @sync_to_async
+    def get_other_user_ids(self, conv_id, me) -> list[int]:
+        return list(
+            Conversation.objects.get(pk=conv_id)
+            .participants
+            .exclude(user_id=me)
+            .values_list("user_id", flat=True)
+        )
+
+    @sync_to_async
+    def is_group(self, conv_id) -> bool:
+        return Conversation.objects.get(pk=conv_id).type == 'group'
+
     # ---------- 连接 ----------
     async def connect(self):
         # 前端连接 ws/chat/<conv_id>/
         self.conv_id = int(self.scope['url_route']['kwargs']['conv_id'])
         self.room_group = f'chat_{self.conv_id}'
-        self.validate_user()
+        await self.validate_user()
         await self.channel_layer.group_add(self.room_group, self.channel_name)
         # ✅ 关键：再加一个“个人收件箱”
         self.inbox_group = f'user_{self.user_id}'
         await self.channel_layer.group_add(self.inbox_group, self.channel_name)
         await self.accept()
-        print(f'[WS] {self.channel_name} 加入房间 {self.room_group}')
-        print(f'[WS] {self.channel_name} 加入房间 {self.inbox_group}')
+        now = datetime.now()
+        now_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        print(f'[WS] {self.user_id} 加入房间 {self.room_group} 加入时间 {now_time}')
+        print(f'[WS] {self.user_id} 加入房间 {self.inbox_group} 加入时间 {now_time}')
 
     # ---------------- 断开 ----------------
     async def disconnect(self, code):
@@ -66,7 +82,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.channel_layer.group_discard(self.room_group, self.channel_name)
         if hasattr(self, 'inbox_group'):
             await self.channel_layer.group_discard(self.inbox_group, self.channel_name)
-        print(f'[WS] {self.channel_name} 离开房间 {self.room_group}')
+        now = datetime.now()
+        now_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        print(f'[WS] {self.channel_name} 离开房间 {self.room_group} 离开时间 {now_time}')
         raise StopConsumer()
 
     # ---------------- 收到消息 ----------------
@@ -87,6 +105,22 @@ class ChatConsumer(AsyncWebsocketConsumer):
         parent_id = data.get("parent_id")  # 可选：回复哪条消息
         print(f'[WS] 收到消息：{content}')
 
+        # ---------- 校验是否是好友 ----------
+        conv = await sync_to_async(Conversation.objects.get)(pk=self.conv_id)
+        if conv.type == 'private':
+            if not await self.both_in_private(conv):
+                await self.channel_layer.group_send(
+                    self.inbox_group,
+                    {
+                        "type": "inbox.notify",
+                        "state": 403,
+                        "payload": {
+                            "content": "对方已解除好友，无法发送消息",
+                        },
+                    }
+                )
+                return
+        
         # 5. 落库（异步）
         try:
             payload = await self.save_message(
@@ -105,31 +139,43 @@ class ChatConsumer(AsyncWebsocketConsumer):
             self.room_group,
             {
                 "type": "chat.message",
+                "state": 200,
                 "payload": payload  # 把完整 dict 发出去
             }
         )
         # 2. 投到收件箱
-        other_uid = await self.get_other_user_id(self.conv_id, self.user_id)
-        await self.channel_layer.group_send(
-            f'user_{other_uid}',
-            {"type": "inbox.notify", "payload": payload}
-        )
+        if await self.is_group(self.conv_id):
+            # 群聊：给所有其他成员推送
+            other_uids = await self.get_other_user_ids(self.conv_id, self.user_id)
+            for uid in other_uids:
+                await self.channel_layer.group_send(
+                    f'user_{uid}',
+                    {"type": "inbox.notify", "state": 200, "payload": payload}
+                )
+        else:
+            other_uid = await self.get_other_user_id(self.conv_id, self.user_id)
+            await self.channel_layer.group_send(
+                f'user_{other_uid}',
+                {"type": "inbox.notify", "state": 200, "payload": payload}
+            )
 
     async def chat_message(self, event):
-        # print('chat_message', event)
         # 给客户端发送消息 - 群组
         await self.send(text_data=json.dumps({
             "type": "normal",
-            'msg': event['payload'],
+            "state": event['state'],
+            "msg": event['payload'],
         }))
-    
+
     async def inbox_notify(self, event):
-    # 只推送，不追加 DOM，前端自己决定是弹窗还是未读+1
+    # 推送到个人
         await self.send(text_data=json.dumps({
             "type": "inbox",
+            "state": event['state'],
             "msg": event["payload"]
         }))
-    
+
+    @sync_to_async
     def validate_user(self):
         r_token = self.scope['cookies']['refresh_token']
         decoded = decode_refresh_token(r_token)
@@ -142,17 +188,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 "msg": '用户身份验证失败'
             })
 
+    @sync_to_async
+    def both_in_private(self, conv: Conversation) -> bool:
+        """私聊：校验双方是否仍在会话里"""
+        if conv.type != 'private':
+            return True
+        # 私聊：检查两人是否都还在 participants 表里
+        uid1, uid2 = conv.private_members
+        other_id = uid1 if self.user_id != uid1 else uid2
+        return (
+            conv.participants.filter(user_id=self.user_id).exists() and
+            conv.participants.filter(user_id=other_id).exists()
+        )
 
-
-# 给客户端发送消息 - 群组
-        # await self.channel_layer.group_send(
-        #     self.room_group,
-        #     {
-        #         'type': 'chat.message',   # 注意： Channels 要求用点号
-        #         'msg': content,
-        #     }
-        # )
-        # # 给客户端发送消息 - 个人
-        # await self.send(text_data=json.dumps({
-        #     'msg': msg,
-        # }))

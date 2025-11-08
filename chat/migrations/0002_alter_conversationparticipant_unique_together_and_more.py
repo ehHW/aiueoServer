@@ -8,7 +8,6 @@ import django.db.models.deletion
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('user', '0027_alter_conversationparticipant_unique_together_and_more'),
         ('chat', '0001_initial'),
     ]
 

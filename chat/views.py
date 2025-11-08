@@ -4,7 +4,7 @@ from typing import List
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.db import transaction
-from django.db.models import Max, F, Q, OuterRef, Subquery
+from django.db.models import OuterRef, Subquery
 
 from .models import Conversation, ConversationParticipant, FriendRequest, Message
 from user.models import User
@@ -14,7 +14,6 @@ from utils.user import get_a_token, get_user
 
 from django.utils import timezone
 from django.utils import timezone as dj_tz
-from django.core.paginator import Paginator, PageNotAnInteger, EmptyPage
 from django.db import models
 
 
@@ -156,6 +155,50 @@ def friend_list(request):
     )
 
 
+# 删除好友
+def del_friend_or_quit_group(request, conv_id):
+    """
+    私聊：解除好友
+    群聊：退群（离开群组）
+    """
+    if request.method != "DELETE":
+        return error_response(405, "Method not allowed")
+    a_token = get_a_token(request)
+    user = get_user(a_token)
+    if not user:
+        return error_response(401, message='用户认证失败')
+    # 找到这对关系（任意方向）
+    conv = Conversation.objects.get(id=conv_id)
+    # 1. 私聊场景
+    if conv.type == Conversation.PRIVATE:
+        members = conv.private_members  # 已排序 [uid1, uid2]
+        if user.user_id not in members:
+            return error_response(403, "您不在该私聊会话中")
+        other_uid = members[0] if members[1] == user.user_id else members[1]
+
+        # 解除好友关系（任意方向）
+        fr = FriendRequest.objects.filter(
+            status=FriendRequest.ACCEPTED,
+            lesser_id=min(user.user_id, other_uid),
+            greater_id=max(user.user_id, other_uid),
+        ).first()
+        if not fr:
+            return error_response(404, "还不是好友")
+        fr.delete()
+        ConversationParticipant.objects.filter(
+            conversation=conv, user=user
+        ).delete()
+        return success_response(message="已解除好友关系")
+    elif conv.type == Conversation.GROUP:
+        deleted, _ = ConversationParticipant.objects.filter(
+            conversation=conv, user=user
+        ).delete()
+        if not deleted:
+            return error_response(403, "您不在该群组中")
+        return success_response(message="已退出群组")
+    else:
+        return error_response(500, '服务器内部错误')
+
 #-----------------会话相关--------------------
 # 获取或创建私聊会话：确保为每对用户创建唯一的私聊会话
 @require_http_methods(["POST"])
@@ -182,12 +225,23 @@ def get_or_create_private(request):
             private_members=members,
             defaults={'creator': user}
         )
-        if created:
+        # 2. 确保两人都在 participants（不管以前有没有退）
+        exists_ids = set(
+            ConversationParticipant.objects
+            .filter(conversation=conv, user_id__in=members)
+            .values_list('user_id', flat=True)
+        )
+        missing = [uid for uid in members if uid not in exists_ids]
+        if missing:
             ConversationParticipant.objects.bulk_create([
                 ConversationParticipant(user_id=uid, conversation=conv)
-                for uid in members
+                for uid in missing
             ])
-
+        # if created:
+        #     ConversationParticipant.objects.bulk_create([
+        #         ConversationParticipant(user_id=uid, conversation=conv)
+        #         for uid in members
+        #     ])
     return success_response({'conversation_id': conv.id}, '私聊会话已建立')
 
 
@@ -363,6 +417,7 @@ def list_messages(request):
 
 
 # 标记消息已读
+@require_http_methods(["POST"])
 def mark_as_read(request):
     a_token = get_a_token(request)
     user = get_user(a_token)
