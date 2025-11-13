@@ -1,4 +1,3 @@
-# chat/views.py
 import json
 from typing import List
 from django.http import HttpResponse, JsonResponse
@@ -73,21 +72,42 @@ def friend_request_list(request):
     user = get_user(a_token)
     if not user:
         return error_response(401, message='用户认证失败')
-
+    direction = request.GET.get("type", "all").strip().lower()
     try:
-        direction = request.GET.get("type", "in").strip().lower()
         if direction == "in":
-            friend_requests = FriendRequest.objects.filter(to_user_id=user.user_id, status=FriendRequest.PENDING)
-        else:
-            friend_requests = FriendRequest.objects.filter(from_user_id=user.user_id, status=FriendRequest.PENDING)
-        data = [{
-            'sender_id': fr.from_user.user_id,
-            'sender_username': fr.from_user.username,
-            'sender_time': fr.created_at,
-            'sender_avatar': fr.from_user.avatar if fr.from_user.avatar else None,
-        } for fr in friend_requests]
+            qs = FriendRequest.objects.filter(to_user_id=user.user_id)
+        elif direction == "out":
+            qs = FriendRequest.objects.filter(from_user_id=user.user_id)
+        else:  # all
+            qs = FriendRequest.objects.filter(
+                models.Q(from_user_id=user.user_id) | models.Q(to_user_id=user.user_id)
+            )
+        user_ids = set()
+        for fr in qs:
+            user_ids.add(fr.from_user_id)
+            user_ids.add(fr.to_user_id)
+
+        # 3. 一次性把用户记录查出来
+        id2user = {u.pk: u for u in User.objects.filter(pk__in=user_ids)}
+        data = []
+        for fr in qs:  # 一次性把 from_user 取出
+            # 统一只返回“对方”的信息，方便前端展示
+            if fr.from_user_id == user.user_id:          # 我发出的
+                other_id = fr.to_user_id
+            else:                                         # 别人发给我的
+                other_id = fr.from_user_id
+            other = id2user.get(other_id)
+            data.append({
+                "user_id": other_id,               # 对方 ID
+                "username": other.username if other else "",
+                "avatar": other.avatar if other and other.avatar else None,
+                "status": fr.status,               # pending / accepted / declined
+                "created_at": fr.created_at,
+                "direction": "out" if fr.from_user_id == user.user_id else "in",  # 给前端做标记
+            })
         return success_response(data=data, message='好友请求列表获取成功')
     except Exception as e:
+        print(e)
         return error_response(500, '服务器内部错误')
 
 
@@ -199,6 +219,7 @@ def del_friend_or_quit_group(request, conv_id):
     else:
         return error_response(500, '服务器内部错误')
 
+
 #-----------------会话相关--------------------
 # 获取或创建私聊会话：确保为每对用户创建唯一的私聊会话
 @require_http_methods(["POST"])
@@ -278,6 +299,60 @@ def create_group(request):
     return success_response({'conversation_id': conv.id}, '群聊创建成功')
 
 
+# 是不是创建人
+@require_http_methods(["POST"])
+def is_group_creator(request, conv_id):
+    user = get_user(get_a_token(request))
+    if not user:
+        return error_response(401, "用户认证失败")
+    conv = Conversation.objects.filter(id=conv_id, creator_id=user.user_id).first()
+    if conv:
+        return success_response()
+    return error_response(400, "你谁啊")
+
+
+# 修改群聊名称
+@require_http_methods(["POST"])
+def change_group_name(request, conv_id):
+    user = get_user(get_a_token(request))
+    if not user:
+        return error_response(401, "用户认证失败")
+    try:
+        conv = Conversation.objects.filter(id=conv_id, creator_id=user.user_id).first()
+        if not conv:
+            return error_response(403, "仅群聊创建者可操作")
+        name = request.POST.get('name')
+        if not name:
+            return error_response(400, "群名称不能为空")
+        conv.name = name
+        conv.save(update_fields=['name'])
+        return success_response(message="群名称修改成功")
+    except:
+        return error_response(500, "服务器内部错误")
+
+
+# 解散群聊
+def del_group(request, conv_id):
+    if request.method != "DELETE":
+        return error_response(405, "Method not allowed")
+    user = get_user(get_a_token(request))
+    if not user:
+        return error_response(401, "用户认证失败")
+    try:
+        conv = Conversation.objects.filter(id=conv_id).first()
+        with transaction.atomic():
+            conv.is_dissolved = True
+            conv.save(update_fields=['is_dissolved'])
+            # 只踢群主自己
+            ConversationParticipant.objects.filter(
+                conversation=conv,
+                user=user
+            ).delete()
+        return success_response(message='群聊已解散')
+    except Exception as e:
+        return error_response(500, "服务器内部错误")
+
+
 # 获取会话列表
 @require_http_methods(["GET"])
 def list_conversations(request):
@@ -321,7 +396,8 @@ def list_conversations(request):
             'unread': unread,
             'last_msg_id': c.last_msg_id,
             'last_time': c.last_time.timestamp() if c.last_time else None,
-            'created_at': c.created_at.timestamp()
+            'created_at': c.created_at.timestamp(),
+            'dissolved': c.is_dissolved,
         })
 
     return success_response(data, '会话列表获取成功')
@@ -424,13 +500,13 @@ def mark_as_read(request):
     if not user:
         return error_response(401, message='用户认证失败')
 
-    conversation_id = request.GET.get('conversation_id')
+    conversation_id = request.GET.get('conv_id')
     if not conversation_id:
         return error_response(401, '房间获取失败')
 
     try:
         participant = ConversationParticipant.objects.get(
-            user=user,
+            user_id=user.user_id,
             conversation_id=conversation_id
         )
         participant.last_read = timezone.now()
@@ -438,3 +514,4 @@ def mark_as_read(request):
         return success_response(message='已标记为已读')
     except ConversationParticipant.DoesNotExist:
         return error_response(403, '无操作权限')
+

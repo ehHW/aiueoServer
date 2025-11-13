@@ -72,14 +72,14 @@ class Migration(migrations.Migration):
             name='content',
             field=models.TextField(validators=[django.core.validators.MaxLengthValidator(20000)]),
         ),
-        migrations.AddIndex(
-            model_name='friendrequest',
-            index=models.Index(fields=['greater_id', 'status'], name='chat_greater_status_idx'),
-        ),
-        migrations.AddIndex(
-            model_name='friendrequest',
-            index=models.Index(fields=['lesser_id', 'status'], name='chat_lesser_status_idx'),
-        ),
+        # migrations.AddIndex(
+        #     model_name='friendrequest',
+        #     index=models.Index(fields=['greater_id', 'status'], name='chat_greater_status_idx'),
+        # ),
+        # migrations.AddIndex(
+        #     model_name='friendrequest',
+        #     index=models.Index(fields=['lesser_id', 'status'], name='chat_lesser_status_idx'),
+        # ),
         migrations.AddConstraint(
             model_name='conversation',
             constraint=models.CheckConstraint(check=models.Q(('type', models.Value('group')), models.Q(('type', models.Value('private')), ('private_members__length', 2)), _connector='OR'), name='private_must_have_two_members'),
@@ -92,10 +92,10 @@ class Migration(migrations.Migration):
             model_name='conversationparticipant',
             constraint=models.UniqueConstraint(fields=('user', 'conversation'), name='uniq_user_conv'),
         ),
-        migrations.AddConstraint(
-            model_name='friendrequest',
-            constraint=models.CheckConstraint(check=models.Q(('lesser_id', models.F('greater_id')), _negated=True), name='chat_no_self_friend'),
-        ),
+        # migrations.AddConstraint(
+        #     model_name='friendrequest',
+        #     constraint=models.CheckConstraint(check=models.Q(('lesser_id', models.F('greater_id')), _negated=True), name='chat_no_self_friend'),
+        # ),
         migrations.AddConstraint(
             model_name='friendrequest',
             constraint=models.UniqueConstraint(fields=('lesser_id', 'greater_id'), name='chat_uniq_friend_pair'),

@@ -10,13 +10,10 @@ from user.models import User
 class FriendRequest(models.Model):
     PENDING, ACCEPTED, DECLINED = "pending", "accepted", "declined"
     STATUS_CHOICES = [(PENDING, "Pending"), (ACCEPTED, "Accepted"), (DECLINED, "Declined")]
-
     # 谁发起的
     from_user_id = models.PositiveIntegerField(db_index=True, default=0)
-
     # 谁接收的
     to_user_id = models.PositiveIntegerField(db_index=True, default=1)
-
     # 保证关系唯一性
     lesser_id = models.PositiveIntegerField(editable=False, db_index=True)
     greater_id = models.PositiveIntegerField(editable=False, db_index=True)
@@ -73,7 +70,7 @@ class Conversation(models.Model):
         related_name="created_conversations"
     )
     created_at = models.DateTimeField(auto_now_add=True)
-
+    is_dissolved = models.BooleanField(default=False, verbose_name='已解散')
     class Meta:
         constraints = [
             CheckConstraint(
@@ -170,3 +167,4 @@ class MessageRead(models.Model):
         constraints = [
             UniqueConstraint(fields=["user", "message"], name="uniq_read")
         ]
+

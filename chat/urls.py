@@ -13,6 +13,9 @@ urlpatterns = [
     path('friends/request/del/<int:conv_id>/', views.del_friend_or_quit_group),
     # 会话相关
     path('conversations/group/', views.create_group),
+    path('conversations/change_group_name/<int:conv_id>/', views.change_group_name),
+    path('conversations/is_group_creator/<int:conv_id>/', views.is_group_creator),
+    path('conversations/del/<int:conv_id>/', views.del_group),
     path('conversations/', views.list_conversations),
     path('conversations/private/', views.get_or_create_private),
     # 消息相关
