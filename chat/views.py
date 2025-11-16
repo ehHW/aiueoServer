@@ -3,9 +3,9 @@ from typing import List
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.db import transaction
-from django.db.models import OuterRef, Subquery
+from django.db.models import OuterRef, Subquery, Exists, Q
 
-from .models import Conversation, ConversationParticipant, FriendRequest, Message
+from .models import Conversation, ConversationParticipant, FriendRequest, Message, MessageRead
 from user.models import User
 from utils.user import get_user
 from utils.response import success_response, error_response
@@ -14,6 +14,9 @@ from utils.user import get_a_token, get_user
 from django.utils import timezone
 from django.utils import timezone as dj_tz
 from django.db import models
+
+from channels.layers import get_channel_layer
+from asgiref.sync import async_to_sync
 
 
 # ---------------------------------django-channels------------------------------------
@@ -273,7 +276,7 @@ def create_group(request):
     if not user:
         return error_response(401, '用户认证失败')
 
-    name = request.POST.get('name')
+    name = request.POST.get('name', f'{user.username}创建的群聊')
     try:
         member_ids: List = json.loads(request.POST.get('member_ids'))
     except TypeError:
@@ -379,15 +382,26 @@ def list_conversations(request):
     for c in qs:
         # 未读数
         participant = c.participants.get(user=user)
-        unread = max((c.last_msg_id or 0) - (participant.read_up_to_msg_id or 0), 0)
-
+        last_read_id = participant.read_up_to_msg_id
+        # 精准未读：对方发的、且在 MessageRead 里找不到我
+        unread = Message.objects.filter(
+            conversation=c
+        ).exclude(
+            sender=user
+        ).annotate(
+            i_read=Exists(
+                MessageRead.objects.filter(message=OuterRef('pk'), user=user)
+            )
+        ).filter(i_read=False).count()
+        last_msg_dt = c.last_time
+        last_msg_ts = last_msg_dt.timestamp() if last_msg_dt else None
         # 私聊：拼对方昵称 + 头像
         if c.type == Conversation.PRIVATE:
             mate_uid = [uid for uid in c.private_members if uid != user.user_id][0]
             target_user = User.objects.get(user_id=mate_uid)
-            title = f'{target_user.username}'          # 没有 nickname，先拼一个
+            title = f'{target_user.username}'
         else:
-            title = c.name or f'群聊#{c.id}'   # 没有群头像字段
+            title = c.name
 
         data.append({
             'id': c.id,
@@ -395,7 +409,7 @@ def list_conversations(request):
             'title': title,
             'unread': unread,
             'last_msg_id': c.last_msg_id,
-            'last_time': c.last_time.timestamp() if c.last_time else None,
+            'last_time': last_msg_ts,
             'created_at': c.created_at.timestamp(),
             'dissolved': c.is_dissolved,
         })
@@ -444,19 +458,19 @@ def send_message(request):
         return error_response(500, '消息发送失败')
 
 
-# 获取消息历史
+# 获取消息列表
 @require_http_methods(["GET"])
 def list_messages(request):
     a_token = get_a_token(request)
     user = get_user(a_token)
     if not user:
         return error_response(401, message='用户认证失败')
-
-    conversation_id = request.GET.get('conversation_id')
-    if not conversation_id:
+    conv_id = request.GET.get('conv_id')
+    conv = Conversation.objects.filter(id=conv_id).first()
+    if not conv:
         return error_response(401, '房间获取失败')
     if not ConversationParticipant.objects.filter(
-        conversation_id=conversation_id, user=user
+        conversation_id=conv_id, user=user
     ).exists():
         return error_response(403, '你不在该会话中')
     try:
@@ -467,19 +481,58 @@ def list_messages(request):
     limit = max(1, min(limit, 50))          # 至少 1 条，最多 50
     
     # ---------- 5. 取消息 ----------
+    # 1. 自己是否已读（接收者视角）
+    read_sq = MessageRead.objects.filter(
+        message=OuterRef('pk'),
+        user=user
+    )
+    # 2. 对方是否已读（发送者视角）
+    if conv.type == Conversation.PRIVATE:
+        mate_uid = [uid for uid in conv.private_members if uid != user.user_id][0]
+        other_read_sq = MessageRead.objects.filter(
+            message=OuterRef('pk'),
+            user_id=mate_uid,
+        )
+    else:
+        other_read_sq = MessageRead.objects.filter(Q(pk__isnull=True))
     qs = Message.objects.filter(
-        conversation_id=conversation_id
-    ).select_related('sender')
+        conversation_id=conv_id
+    ).select_related('sender').annotate(
+        is_read_by_me=Exists(read_sq),
+        is_read_by_other=Exists(other_read_sq)
+    )
     if last_msg_id > 0:
         qs = qs.filter(id__lt=last_msg_id)   # 往前翻
     qs = qs.order_by('-timestamp')[:limit]
+    msg_ids = [m.id for m in qs]          # 用于后续聚合
     qs = reversed(qs)
+    # ---------- 群聊：一次性聚合已读成员 ----------
+    readers_map = {}
+    if conv.type == Conversation.GROUP and msg_ids:
+        readers_qs = (
+            MessageRead.objects
+            .filter(message_id__in=msg_ids)
+            .values('message_id', 'user_id', 'user__username')
+        )
+        for row in readers_qs:
+            readers_map.setdefault(row['message_id'], []).append({
+                'user_id': row['user_id'],
+                'username': row['user__username'],
+            })
     # 6. 序列化
     data = []
     for m in qs:
         ts = m.timestamp
         if dj_tz.is_aware(ts):
             ts = ts.astimezone(timezone.utc)
+        # 群聊：带上已读人数 + 成员列表
+        if conv.type == Conversation.GROUP:
+            readers = readers_map.get(m.id, [])
+            read_count = len(readers)
+            # is_read_by_other = False   # 群聊无意义，恒假
+        else:
+            readers = []
+            read_count = 0
         data.append({
             'id': m.id,
             'sender_id': m.sender_id,
@@ -488,6 +541,10 @@ def list_messages(request):
             'timestamp': int(ts.timestamp() * 1000),
             'is_recalled': m.is_recalled,
             'parent_id': m.parent_message_id or 0,
+            'is_read': m.is_read_by_me,
+            'is_read_by_other': m.is_read_by_other,
+            'read_count': read_count,
+            'readers': readers,
         })
     return success_response(data, '消息列表获取成功')
 
@@ -500,18 +557,55 @@ def mark_as_read(request):
     if not user:
         return error_response(401, message='用户认证失败')
 
-    conversation_id = request.GET.get('conv_id')
-    if not conversation_id:
-        return error_response(401, '房间获取失败')
+    msg_id = request.POST.get('msg_id')
+    msg = Message.objects.get(id=msg_id)
+    if not msg:
+        return error_response(401, '消息不存在')
+    if msg.sender_id == user.user_id:
+        return error_response(400, "不能标记自己消息为已读")
+    conv = msg.conversation
+    if not ConversationParticipant.objects.filter(
+        conversation=conv, user=user
+    ).exists():
+        return error_response(403, "您不在该会话中")
+    
+    read_obj, created = MessageRead.objects.get_or_create(
+        user=user,
+        message=msg,
+        defaults={"read_at": timezone.now()}
+    )
 
-    try:
-        participant = ConversationParticipant.objects.get(
-            user_id=user.user_id,
-            conversation_id=conversation_id
+    with transaction.atomic():
+        participant = ConversationParticipant.objects.select_for_update().get(
+            conversation=conv, user=user
         )
-        participant.last_read = timezone.now()
-        participant.save()
-        return success_response(message='已标记为已读')
-    except ConversationParticipant.DoesNotExist:
-        return error_response(403, '无操作权限')
-
+        # 只往后更新，防止乱序
+        if participant.read_up_to_msg_id is None or msg.id > participant.read_up_to_msg_id:
+            participant.read_up_to_msg_id = msg.id
+            participant.save(update_fields=["read_up_to_msg_id"])
+    
+    channel_layer = get_channel_layer()
+    async_to_sync(channel_layer.group_send)(
+        f"user_{msg.sender_id}",  # 发送方收件箱
+        {
+            "type": "msg.read",
+            "state": 200,
+            "data": {
+                "msg_id": msg.id,
+                "conv_id": msg.conversation.id,
+                "reader_id": user.user_id,
+                "reader_name": user.username,
+                "read_at": read_obj.read_at.isoformat(),
+            },
+        }
+    )
+    return success_response(
+        {
+            "msg_id": msg.id,
+            "conv_id": msg.conversation.id,
+            "reader_id": user.user_id,
+            "reader_name": user.username,
+            "read_at": read_obj.read_at.isoformat(),
+        },
+        "已读成功"
+    )

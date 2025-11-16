@@ -10,7 +10,7 @@ from utils.token import decode_refresh_token
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'aiueoServer.settings')
 django.setup()
-from .models import Conversation, Message
+from .models import Conversation, Message, MessageRead
 from user.models import User
 from asgiref.sync import sync_to_async
 
@@ -24,23 +24,50 @@ class ChatConsumer(AsyncWebsocketConsumer):
         parent = None
         if parent_id:
             parent = Message.objects.filter(pk=parent_id).first()
-
         msg = Message.objects.create(
             conversation=conv,
             sender=sender,
             content=content,
             parent_message=parent
         )
-        return {
-            "id": msg.id,
-            "conv_id": conv_id,
-            "sender_id": sender.user_id,
-            "sender_username": sender.username,
-            "parent_id": parent.id if parent else None,
-            "content": msg.content,
-            "timestamp": msg.timestamp.isoformat(),
-            "is_recalled": False,
-        }
+        return msg
+        # {
+        #     "id": msg.id,
+        #     "conv_id": conv_id,
+        #     "sender_id": sender.user_id,
+        #     "sender_username": sender.username,
+        #     "parent_id": parent.id if parent else None,
+        #     "content": msg.content,
+        #     "timestamp": msg.timestamp.isoformat(),
+        #     "is_recalled": msg.is_recalled,
+        # }
+
+    @staticmethod
+    @sync_to_async
+    def get_read_info(msg: Message, conv: Conversation, user: User):
+        # 1. 自己是否已读
+        me_read = MessageRead.objects.filter(message=msg, user=user).exists()
+        if conv.type == Conversation.PRIVATE:
+            mate_uid = [uid for uid in conv.private_members if uid != user.user_id][0]
+            other_read = MessageRead.objects.filter(message=msg, user_id=mate_uid).exists()
+            return {
+                'is_read': me_read,
+                'is_read_by_other': other_read,
+                'read_count': 0,
+                'readers': [],
+            }
+        else:
+            readers = list(
+                MessageRead.objects
+                .filter(message=msg)
+                .values('user_id', 'user__username')
+            )
+            return {
+                'is_read': me_read,
+                'is_read_by_other': False,
+                'read_count': len(readers),
+                'readers': readers,
+            }
 
     @sync_to_async
     def get_other_user_id(self, conv_id, me):
@@ -67,7 +94,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         self.room_group = f'chat_{self.conv_id}'
         await self.validate_user()
         await self.channel_layer.group_add(self.room_group, self.channel_name)
-        # ✅ 关键：再加一个“个人收件箱”
+        # 个人收件箱
         self.inbox_group = f'user_{self.user_id}'
         await self.channel_layer.group_add(self.inbox_group, self.channel_name)
         await self.accept()
@@ -123,7 +150,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         
         # 5. 落库（异步）
         try:
-            payload = await self.save_message(
+            msg_obj = await self.save_message(
                 conv_id=self.conv_id,
                 sender_id=self.user_id,
                 content=content,
@@ -134,7 +161,19 @@ class ChatConsumer(AsyncWebsocketConsumer):
             print("[WS] 落库失败:", e)
             return
 
-        # 6. 回播给整个房间
+        read_info = await self.get_read_info(msg_obj, conv, self.user)
+        payload = {
+            "id": msg_obj.id,
+            "conv_id": self.conv_id,
+            "sender_id": msg_obj.sender.user_id,
+            "sender_username": msg_obj.sender.username,
+            "parent_id": msg_obj.parent_message_id,
+            "content": msg_obj.content,
+            "timestamp": msg_obj.timestamp.isoformat(),
+            "is_recalled": msg_obj.is_recalled,
+            **read_info  # 展开四个已读字段
+        }
+        # 回播给整个房间
         await self.channel_layer.group_send(
             self.room_group,
             {
@@ -143,7 +182,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 "payload": payload  # 把完整 dict 发出去
             }
         )
-        # 2. 投到收件箱
+        # 投到收件箱
         if await self.is_group(self.conv_id):
             # 群聊：给所有其他成员推送
             other_uids = await self.get_other_user_ids(self.conv_id, self.user_id)
@@ -162,9 +201,11 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def chat_message(self, event):
         # 给客户端发送消息 - 群组
         await self.send(text_data=json.dumps({
-            "type": "normal",
+            "type": "group",
             "state": event['state'],
-            "msg": event['payload'],
+            "data": {
+                "msg": event['payload']
+            },
         }))
 
     async def inbox_notify(self, event):
@@ -172,7 +213,16 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.send(text_data=json.dumps({
             "type": "inbox",
             "state": event['state'],
-            "msg": event["payload"]
+            "data": {
+                "msg": event['payload']
+            },
+        }))
+
+    async def msg_read(self, event):
+        await self.send(text_data=json.dumps({
+            "type": "read_receipt",
+            "state": event['state'],
+            "data": event["data"]
         }))
 
     @sync_to_async
@@ -182,6 +232,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
 
         if decoded['state'] == 1:
             self.user_id = decoded['data']['user_id']
+            self.user = User.objects.filter(user_id=self.user_id).first()
         else:
             return self.send({
                 "state": 401,
