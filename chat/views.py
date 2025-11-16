@@ -609,3 +609,4 @@ def mark_as_read(request):
         },
         "已读成功"
     )
+
